@@ -1,0 +1,12 @@
+resolver: lts-11.17
+
+packages:
+- .
+
+flags: {}
+
+extra-deps:
+- HFuse-0.2.5.0
+
+extra-package-dbs: []
+

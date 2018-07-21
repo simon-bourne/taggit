@@ -1,0 +1,11 @@
+name:                tagit
+version:             0.1.0.0
+
+dependencies:
+  - base >= 4.7 && < 5
+  - HFuse
+
+executables:
+  tagit:
+    source-dirs:      src
+    main:             Main.hs
