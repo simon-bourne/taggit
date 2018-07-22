@@ -10,9 +10,11 @@ import "unix-bytestring" System.Posix.IO.ByteString
 import Foreign.C.Error
 import System.Fuse
 import Foreign.C.Types
-import Data.Map.Strict (fromList, Map, keys, lookup)
+import Data.Map.Strict (fromList, Map, keys, lookup, toList)
 import System.FilePath
 import Data.List (dropWhileEnd)
+import System.Posix.User
+import System.Posix.Types
 
 data Handle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
@@ -33,7 +35,12 @@ dirTree :: TagTree
 dirTree = Dir $ fromList [("simon", Link "/home/simon"), ("test", Dir $ fromList [("xyz", Link "/home/simon/bin/BourneoDB.sh")])]
 
 main :: IO ()
-main = fuseMain (fsOps dirTree) defaultExceptionHandler
+main = do
+    userId <- getEffectiveUserID
+    groupId <- getEffectiveGroupID
+    let dirStat = mkDirStat userId groupId
+    let linkStat = mkLinkStat userId groupId
+    fuseMain (fsOps dirStat linkStat dirTree) defaultExceptionHandler
 
 readFile :: FilePath -> Handle -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
 readFile _ h bc offset = case h of
@@ -53,17 +60,21 @@ flushFile _ h = case h of
 openDirectory :: TagTree -> FilePath -> IO Errno
 openDirectory tree fp = pure eOK
 
-readDirectory :: TagTree -> FilePath -> IO (Either Errno [(FilePath, FileStat)])
-readDirectory tree path = do
-    ctx <- getFuseContext
-    pure $ case lookupPath path tree of
-        Nothing -> Left eNOENT
-        Just (Link _) -> Left eNOTDIR
-        Just (Dir entries) -> Right $ zip (keys entries) $ repeat $ dirStat ctx
+readDirectory :: FileStat -> FileStat -> TagTree -> FilePath -> IO (Either Errno [(FilePath, FileStat)])
+readDirectory dirStat linkStat tree path = let
+    addStat = \case
+        Dir _ -> dirStat
+        Link _ -> linkStat
+    in do
+        print "readDirectory"
+        pure $ case lookupPath path tree of
+            Nothing -> Left eNOENT
+            Just (Link _) -> Left eNOTDIR
+            Just (Dir entries) -> Right $ (fmap addStat <$> toList entries)
 
 getFileSystemStats :: String -> IO (Either Errno FileSystemStats)
 getFileSystemStats str =
-  return $ Right $ FileSystemStats
+  pure $ Right $ FileSystemStats
     { fsStatBlockSize = 512
     , fsStatBlockCount = 1
     , fsStatBlocksFree = 1
@@ -73,13 +84,11 @@ getFileSystemStats str =
     , fsStatMaxNameLength = 255
 }
 
-getFileStat :: TagTree -> FilePath -> IO (Either Errno FileStat)
-getFileStat tree fp = do
-    ctx <- getFuseContext
-    pure $ case lookupPath fp tree of
-        Just (Dir _) -> Right $ dirStat ctx
-        Just (Link _) -> Right $ linkStat ctx
-        Nothing -> Left eNOENT
+getFileStat :: FileStat -> FileStat -> TagTree -> FilePath -> IO (Either Errno FileStat)
+getFileStat dirStat linkStat tree fp = pure $ case lookupPath fp tree of
+    Just (Dir _) -> Right dirStat
+    Just (Link _) -> Right linkStat
+    Nothing -> Left eNOENT
 
 readSymLink :: TagTree -> FilePath -> IO (Either Errno FilePath)
 readSymLink tree fp = pure $ case lookupPath fp tree of
@@ -89,24 +98,25 @@ readSymLink tree fp = pure $ case lookupPath fp tree of
 
 openFile  :: TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno Handle)
 openFile tree fp mode flags = case lookupPath fp tree of
-        Just (Link dest) -> (Right . External) <$> openFd dest mode Nothing flags
-        Just (Dir _) -> pure $ Right Internal
-        Nothing -> pure $ Left eNOENT
+    Just (Link dest) -> (Right . External) <$> openFd dest mode Nothing flags
+    Just (Dir _) -> pure $ Right Internal
+    Nothing -> pure $ Left eNOENT
 
-fsOps :: TagTree -> FuseOperations Handle
-fsOps tree = defaultFuseOps{
-    fuseGetFileStat = getFileStat tree,
+fsOps :: FileStat -> FileStat -> TagTree -> FuseOperations Handle
+fsOps dirStat linkStat tree = defaultFuseOps{
+    fuseGetFileStat = getFileStat dirStat linkStat tree,
     fuseReadSymbolicLink = readSymLink tree,
     fuseOpen = openFile tree,
     fuseRead = readFile,
     fuseWrite = writeFile,
     fuseFlush = flushFile,
     fuseOpenDirectory = openDirectory tree,
-    fuseReadDirectory = readDirectory tree,
+    fuseReadDirectory = readDirectory dirStat linkStat tree,
     fuseGetFileSystemStats = getFileSystemStats
 }
 
-linkStat ctx = FileStat { statEntryType = SymbolicLink
+mkLinkStat :: UserID -> GroupID -> FileStat
+mkLinkStat userId groupId = FileStat { statEntryType = SymbolicLink
                        , statFileMode = foldr1 unionFileModes
                                           [ symbolicLinkMode,
                                             ownerReadMode
@@ -117,8 +127,8 @@ linkStat ctx = FileStat { statEntryType = SymbolicLink
                                           , otherExecuteMode
                                           ]
                        , statLinkCount = 1
-                       , statFileOwner = fuseCtxUserID ctx
-                       , statFileGroup = fuseCtxGroupID ctx
+                       , statFileOwner = userId
+                       , statFileGroup = groupId
                        , statSpecialDeviceID = 0
                        , statFileSize = 3
                        , statBlocks = 0
@@ -127,7 +137,7 @@ linkStat ctx = FileStat { statEntryType = SymbolicLink
                        , statStatusChangeTime = 0
                        }
 
-dirStat ctx = FileStat { statEntryType = Directory
+mkDirStat userId groupId = FileStat { statEntryType = Directory
                        , statFileMode = foldr1 unionFileModes
                                           [ ownerReadMode
                                           , ownerExecuteMode
@@ -137,8 +147,8 @@ dirStat ctx = FileStat { statEntryType = Directory
                                           , otherExecuteMode
                                           ]
                        , statLinkCount = 2
-                       , statFileOwner = fuseCtxUserID ctx
-                       , statFileGroup = fuseCtxGroupID ctx
+                       , statFileOwner = userId
+                       , statFileGroup = groupId
                        , statSpecialDeviceID = 0
                        , statFileSize = 4096
                        , statBlocks = 1
