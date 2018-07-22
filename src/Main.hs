@@ -31,7 +31,7 @@ import System.Fuse
         FuseOperations
     )
 import qualified System.Fuse as Fuse
-import Data.Map.Strict (Map)
+import Data.Map.Lazy (Map)
 import qualified Data.Map.Strict as Map
 import System.FilePath (splitPath)
 import Data.List (dropWhileEnd)
@@ -41,6 +41,13 @@ import Data.Either (fromLeft)
 data Handle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
 
+{- TODO
+
+Find all tags files and build a list of tags for each file. Each file is reached via a path in `concat (subsequences <$> permutation path)`.
+Combine all paths to make a `TagTree`.
+
+How to resolve conflicting directory and tag names?
+-}
 dirTree :: TagTree
 dirTree = Dir $ Map.fromList [("simon", Link "/home/simon"), ("test", Dir $ Map.fromList [("xyz", Link "/home/simon/bin/BourneoDB.sh")])]
 
