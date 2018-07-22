@@ -49,10 +49,10 @@ Combine all paths to make a `TagTree`.
 To avoid conflicts, we have a directory for sub tags. The directory is called `and`, `or` or `not`, corresponding to the logical operator.
 
 It may be better to view this as building an expression, where it's not useful to show tautologies like `X and X`.
-Tautologies may be the wrong concept - maybe we want the concept of something not narrowing down the data set.
+Tautologies may be the wrong concept - maybe we want the concept of only showing things that would narrow down the set.
 -}
 dirTree :: TagTree
-dirTree = Dir $ Map.fromList [("simon", Link "/home/simon"), ("test", Dir $ Map.fromList [("xyz", Link "/home/simon/bin/BourneoDB.sh")])]
+dirTree = Dir $ Map.fromList [("simon", Link "/home/simon"), ("test", Dir $ Map.fromList [("xyz", Link "/home/simon/bin/BourneoDB.sh"), ("andOn", Dir $ Map.fromList [("andOn", dirTree)])])]
 
 lookupPath :: FilePath -> TagTree -> Maybe TagTree
 lookupPath path =
