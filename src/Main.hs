@@ -43,10 +43,13 @@ data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
 
 {- TODO
 
-Find all tags files and build a list of tags for each file. Each file is reached via a path in `concat (subsequences <$> permutation path)`.
+Find all tags files and build a list of tags for each file. Each file is reached via a path in `concat (subsequences <$> permutation paths)`.
 Combine all paths to make a `TagTree`.
 
-How to resolve conflicting directory and tag names?
+To avoid conflicts, we have a directory for sub tags. The directory is called `and`, `or` or `not`, corresponding to the logical operator.
+
+It may be better to view this as building an expression, where it's not useful to show tautologies like `X and X`.
+Tautologies may be the wrong concept - maybe we want the concept of something not narrowing down the data set.
 -}
 dirTree :: TagTree
 dirTree = Dir $ Map.fromList [("simon", Link "/home/simon"), ("test", Dir $ Map.fromList [("xyz", Link "/home/simon/bin/BourneoDB.sh")])]
