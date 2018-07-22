@@ -2,10 +2,35 @@ module Main (main) where
 
 import Data.ByteString.Char8 (ByteString)
 import System.Posix.Types (GroupID, UserID, FileOffset, Fd, ByteCount)
-import System.Posix.Files (otherExecuteMode, otherReadMode, groupExecuteMode, groupReadMode, ownerExecuteMode, ownerReadMode)
-import System.Posix.IO (closeFd, openFd)
+import System.Posix.Files
+    (
+        unionFileModes,
+        otherExecuteMode,
+        otherReadMode,
+        groupExecuteMode,
+        groupReadMode,
+        ownerExecuteMode,
+        ownerReadMode
+    )
+import System.Posix.IO (OpenMode, OpenFileFlags, closeFd, openFd)
 import "unix-bytestring" System.Posix.IO.ByteString (fdPread, fdPwrite)
+import Foreign.C.Error (Errno, eOK, eNOENT, eNOTDIR, eNOSYS, eINVAL)
 import System.Fuse
+    (
+        fuseMain,
+        fuseGetFileSystemStats,
+        fuseReadDirectory,
+        fuseOpenDirectory,
+        fuseFlush,
+        fuseWrite,
+        fuseRead,
+        fuseOpen,
+        fuseReadSymbolicLink,
+        fuseGetFileStat,
+        defaultFuseOps,
+        FuseOperations
+    )
+import qualified System.Fuse as Fuse
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import System.FilePath (splitPath)
@@ -31,32 +56,40 @@ lookupPath path =
             _ -> Nothing
     in go (removeRoot $ splitPath path)
 
-getEntryType :: TagTree -> EntryType
+getEntryType :: TagTree -> Fuse.EntryType
 getEntryType = \case
-    Dir _ -> Directory
-    Link _ -> SymbolicLink
+    Dir _ -> Fuse.Directory
+    Link _ -> Fuse.SymbolicLink
 
-getFileStat :: MkStat -> TagTree -> FilePath -> IO (Either Errno FileStat)
-getFileStat (MkStat stat) tree fp = pure $ case lookupPath fp tree of
-    Just entry -> Right $ stat $ getEntryType entry
-    Nothing -> Left eNOENT
+ifExists :: TagTree -> FilePath -> (TagTree -> IO (Either Errno a)) -> IO (Either Errno a)
+ifExists tree fp f =
+    let path = lookupPath fp tree
+    in maybe (pure $ Left eNOENT) f path
+
+getFileStat :: MkStat -> TagTree -> FilePath -> IO (Either Errno Fuse.FileStat)
+getFileStat (MkStat stat) tree fp = ifExists tree fp (pure . Right . stat . getEntryType)
 
 readSymLink :: TagTree -> FilePath -> IO (Either Errno FilePath)
-readSymLink tree fp = pure $ case lookupPath fp tree of
-    Just (Link dest) -> Right dest
-    Just (Dir _) -> Left eINVAL
-    Nothing -> Left eNOENT
-
-openFile  :: TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno Handle)
-openFile tree fp mode flags = case lookupPath fp tree of
-    Just (Link dest) -> (Right . External) <$> openFd dest mode Nothing flags
-    Just (Dir _) -> pure $ Right Internal
-    Nothing -> pure $ Left eNOENT
+readSymLink tree fp =
+    let
+        symLinkDest :: TagTree -> IO (Either Errno FilePath)
+        symLinkDest = pure . \case
+            Link dest -> Right dest
+            Dir _ -> Left eINVAL
+    in ifExists tree fp symLinkDest
 
 passThrough :: Handle -> (Fd -> IO a) -> IO (Either Errno a)
 passThrough h f = case h of
     External fd -> Right <$> f fd
     Internal -> pure $ Left eNOSYS
+
+openFile  :: TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno Handle)
+openFile tree fp mode flags =
+    let
+        openAt = \case
+            Link dest -> (Right . External) <$> openFd dest mode Nothing flags
+            Dir _ -> pure $ Right Internal
+    in ifExists tree fp openAt
 
 readExternalFile :: FilePath -> Handle -> ByteCount -> FileOffset -> IO (Either Errno ByteString)
 readExternalFile _ h bc offset = passThrough h $ \fd -> fdPread fd bc offset
@@ -70,26 +103,27 @@ flushFile _ h = fromLeft eOK <$> passThrough h closeFd
 openDirectory :: TagTree -> FilePath -> IO Errno
 openDirectory tree fp = pure $ maybe eNOENT (const eOK) $ lookupPath fp tree
 
-readDirectory :: MkStat -> TagTree -> FilePath -> IO (Either Errno [(FilePath, FileStat)])
+readDirectory :: MkStat -> TagTree -> FilePath -> IO (Either Errno [(FilePath, Fuse.FileStat)])
 readDirectory (MkStat stat) tree path =
-    let addStat = stat . getEntryType
-    in do
-        print "readDirectory"
-        pure $ case lookupPath path tree of
-            Nothing -> Left eNOENT
-            Just (Link _) -> Left eNOTDIR
-            Just (Dir entries) -> Right $ (fmap addStat <$> Map.toList entries)
+    let
+        addStat = stat . getEntryType
 
-getFileSystemStats :: String -> IO (Either Errno FileSystemStats)
-getFileSystemStats = const $ pure $ Right $ FileSystemStats
+        readIfDir :: TagTree -> IO (Either Errno [(FilePath, Fuse.FileStat)])
+        readIfDir = pure . \case
+            Link _ -> Left eNOTDIR
+            Dir entries -> Right $ (fmap addStat <$> Map.toList entries)
+    in ifExists tree path readIfDir
+
+getFileSystemStats :: String -> IO (Either Errno Fuse.FileSystemStats)
+getFileSystemStats = const $ pure $ Right $ Fuse.FileSystemStats
     {
-        fsStatBlockSize = 512,
-        fsStatBlockCount = 0,
-        fsStatBlocksFree = 0,
-        fsStatBlocksAvailable = 0,
-        fsStatFileCount = 0,
-        fsStatFilesFree = 0,
-        fsStatMaxNameLength = 255
+        Fuse.fsStatBlockSize = 512,
+        Fuse.fsStatBlockCount = 0,
+        Fuse.fsStatBlocksFree = 0,
+        Fuse.fsStatBlocksAvailable = 0,
+        Fuse.fsStatFileCount = 0,
+        Fuse.fsStatFilesFree = 0,
+        Fuse.fsStatMaxNameLength = 255
     }
 
 fsOps :: TagTree -> MkStat -> FuseOperations Handle
@@ -106,13 +140,13 @@ fsOps tree stat = defaultFuseOps
         fuseGetFileSystemStats = getFileSystemStats
     }
 
-newtype MkStat = MkStat (EntryType -> FileStat)
+newtype MkStat = MkStat (Fuse.EntryType -> Fuse.FileStat)
 
 mkStat :: UserID -> GroupID -> MkStat
-mkStat userId groupId = MkStat $ \entryType -> FileStat
+mkStat userId groupId = MkStat $ \entryType -> Fuse.FileStat
     {
-        statEntryType = entryType,
-        statFileMode = foldr unionFileModes ownerReadMode
+        Fuse.statEntryType = entryType,
+        Fuse.statFileMode = foldr unionFileModes ownerReadMode
             [
                 ownerExecuteMode,
                 groupReadMode,
@@ -120,19 +154,19 @@ mkStat userId groupId = MkStat $ \entryType -> FileStat
                 otherReadMode,
                 otherExecuteMode
             ],
-            statLinkCount = 1,
-            statFileOwner = userId,
-            statFileGroup = groupId,
-            statSpecialDeviceID = 0,
-            statFileSize = 1,
-            statBlocks = 0,
-            statAccessTime = 0,
-            statModificationTime = 0,
-            statStatusChangeTime = 0
+        Fuse.statLinkCount = 1,
+        Fuse.statFileOwner = userId,
+        Fuse.statFileGroup = groupId,
+        Fuse.statSpecialDeviceID = 0,
+        Fuse.statFileSize = 1,
+        Fuse.statBlocks = 0,
+        Fuse.statAccessTime = 0,
+        Fuse.statModificationTime = 0,
+        Fuse.statStatusChangeTime = 0
     }
 
 main :: IO ()
 main = do
     userId <- getEffectiveUserID
     groupId <- getEffectiveGroupID
-    fuseMain (fsOps dirTree $ mkStat userId groupId) defaultExceptionHandler
+    fuseMain (fsOps dirTree $ mkStat userId groupId) Fuse.defaultExceptionHandler
