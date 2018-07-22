@@ -1,10 +1,17 @@
 name:                tagit
 version:             0.1.0.0
 
+default-extensions:
+- PackageImports
+- LambdaCase
+
 dependencies:
   - base >= 4.7 && < 5
   - bytestring
+  - containers
+  - filepath
   - unix
+  - unix-bytestring
   - HFuse
 
 executables:
