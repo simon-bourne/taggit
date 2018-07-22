@@ -14,7 +14,18 @@ dependencies:
   - unix-bytestring
   - HFuse
 
-ghc-options: -threaded
+ghc-options:
+    - -threaded
+    - -Wall
+    - -Wcompat
+    - -Werror
+    - -Widentities
+    - -Wincomplete-record-updates
+    - -Wincomplete-uni-patterns
+    - -Wmonomorphism-restriction
+    - -Wnoncanonical-monad-instances
+    - -Wnoncanonical-monadfail-instances
+    - -j8
 
 executables:
   tagit:
