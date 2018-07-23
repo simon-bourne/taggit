@@ -41,6 +41,7 @@ import System.FilePath (takeFileName, takeDirectory, splitPath)
 import Data.List (dropWhileEnd)
 import System.Posix.User (getEffectiveGroupID, getEffectiveUserID)
 import Data.Either (fromLeft)
+import System.Directory (makeAbsolute)
 
 data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
@@ -190,9 +191,11 @@ allPaths :: [FilePath] -> [[FilePath]]
 allPaths tags = concat (((intercalate ["and"] <$>) <$> permutations <$> subsequences (pathComponents <$> tags)))
 
 singleTagTree :: FilePath -> [FilePath] -> TagTree
-singleTagTree dir = \case
-    [] -> Dir $ Map.singleton (takeFileName $ takeDirectory dir) $ Link dir
-    tag : tags -> Dir $ Map.singleton tag $ singleTagTree dir tags
+singleTagTree tagsFile =
+    let dir = takeDirectory tagsFile
+    in \case
+        [] -> Dir $ Map.singleton (takeFileName dir) $ Link dir
+        tag : tags -> Dir $ Map.singleton tag $ singleTagTree tagsFile tags
 
 allTagTrees :: Tagged -> TagTree
 allTagTrees (Tagged dir paths) = mconcat (singleTagTree dir <$> allPaths paths)
@@ -200,7 +203,8 @@ allTagTrees (Tagged dir paths) = mconcat (singleTagTree dir <$> allPaths paths)
 main :: IO ()
 main = do
     tagsFiles <- File.find (fileType ==? Directory) (fileType ==? RegularFile &&? fileName ==? "tags") "."
-    tagsContents <- mapM readTags tagsFiles
+    absTagsFiles <- mapM makeAbsolute tagsFiles
+    tagsContents <- mapM readTags absTagsFiles
 
     let dirTree = mconcat (allTagTrees <$> tagsContents)
     userId <- getEffectiveUserID

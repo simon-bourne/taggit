@@ -12,6 +12,7 @@ dependencies:
   - bytestring
   - classy-prelude
   - containers
+  - directory
   - filemanip
   - filepath
   - unix
