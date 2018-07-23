@@ -129,7 +129,7 @@ readDirectory (MkStat stat) tree path =
         readIfDir :: TagTree -> IO (Either Errno [(FilePath, Fuse.FileStat)])
         readIfDir = pure . \case
             Link _ -> Left eNOTDIR
-            Dir entries -> Right $ (fmap addStat <$> Map.toList entries)
+            Dir entries -> Right $ ((addStat <$>) <$> Map.toList entries)
     in ifExists tree path readIfDir
 
 getFileSystemStats :: String -> IO (Either Errno Fuse.FileSystemStats)
