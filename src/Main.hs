@@ -165,13 +165,7 @@ mkStat userId groupId = MkStat $ \entryType -> Fuse.FileStat
     {
         Fuse.statEntryType = entryType,
         Fuse.statFileMode = foldr unionFileModes ownerReadMode
-            [
-                ownerExecuteMode,
-                groupReadMode,
-                groupExecuteMode,
-                otherReadMode,
-                otherExecuteMode
-            ],
+            [ownerExecuteMode, groupReadMode, groupExecuteMode, otherReadMode, otherExecuteMode],
         Fuse.statLinkCount = 1,
         Fuse.statFileOwner = userId,
         Fuse.statFileGroup = groupId,
