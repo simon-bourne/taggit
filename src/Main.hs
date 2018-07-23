@@ -57,10 +57,6 @@ instance Monoid TagTree where
     mempty = Dir Map.empty
     mappend = (<>)
 
-{- TODO
-It may be better to view this as building an expression, where it's not useful to show tautologies like `X and X`.
-Tautologies may be the wrong concept - maybe we want the concept of only showing things that would narrow down the set.
--}
 pathComponents :: FilePath -> [FilePath]
 pathComponents path = filter (/= "") (dropWhileEnd (== '/') <$> splitPath path)
 
