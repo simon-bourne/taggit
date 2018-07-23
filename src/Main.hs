@@ -45,6 +45,7 @@ import System.Directory (makeAbsolute)
 import System.FSNotify (watchTree, withManager, eventPath, Event(..), Event)
 import Control.Concurrent.Extra (newLock, newVar, writeVar, readVar, withLock, Var, Lock)
 
+-- TODO: Convert exceptions to their corresponding `errno`.
 data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
 
