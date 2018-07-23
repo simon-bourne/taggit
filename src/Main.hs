@@ -1,4 +1,3 @@
-{-# LANGUAGE FlexibleInstances #-}
 module Main (main) where
 
 import ClassyPrelude
@@ -47,15 +46,12 @@ data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
 
 instance Semigroup TagTree where
+    -- Favour links over directories, as links are results.
     x <> y = case (x, y) of
-        (Link _, Link _) -> x -- TODO: Report this
-        (Dir entries, Link _)
-            | null entries -> y
-            | otherwise -> x
-        (Link _, _) -> y <> x
+        (Link _, _) -> x
+        (_, Link _) -> y
         (Dir entriesX, Dir entriesY) -> Dir $ Map.unionWith mappend entriesX entriesY
 
--- TODO: Report errors. Make Either Error TagTree an instance of Monoid instead, or collect the errors in a list.
 instance Monoid TagTree where
     mempty = Dir Map.empty
     mappend = (<>)
