@@ -220,21 +220,17 @@ handleFileChanges lock tagMapHandle tagTreeHandle event =
                 add = do
                     contents <- readTags absTagsFile
                     let newTagTree = snd $ allTagTrees contents
-                    let newTagMap = Map.insert absTagsFile newTagTree tagMap
-                    tagTree <- readVar tagTreeHandle
-                    pure (newTagMap, tagTree <> newTagTree)
+                    pure $ Map.insert absTagsFile newTagTree tagMap
             in case event of
                 Added _ _ -> add
                 Modified _ _ -> add
-                Removed _ _ ->
-                    let newTagMap = Map.delete absTagsFile tagMap
-                    in pure (newTagMap, mkDirTree newTagMap)
+                Removed _ _ -> pure $ Map.delete absTagsFile tagMap
     in withLock lock $ do
         absTagsFile <- makeAbsolute $ eventPath event
         tagMap <- readVar tagMapHandle
-        (newTagMap, newTagTree) <- handleEvent absTagsFile tagMap
+        newTagMap <- handleEvent absTagsFile tagMap
         writeVar tagMapHandle newTagMap
-        writeVar tagTreeHandle newTagTree
+        writeVar tagTreeHandle $ mkDirTree newTagMap
 
 mkDirTree :: Map FilePath TagTree -> TagTree
 mkDirTree = mconcat . Map.elems
