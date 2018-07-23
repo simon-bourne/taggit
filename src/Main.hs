@@ -43,6 +43,7 @@ import System.Posix.User (getEffectiveGroupID, getEffectiveUserID)
 import Data.Either (fromLeft)
 import System.Directory (makeAbsolute)
 import System.FSNotify
+import Control.Concurrent.Extra
 
 data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
@@ -61,7 +62,7 @@ instance Monoid TagTree where
 pathComponents :: FilePath -> [FilePath]
 pathComponents path = filter (/= "") (dropWhileEnd (== '/') <$> splitPath path)
 
-lookupPath :: FilePath -> TVar TagTree -> IO (Maybe TagTree)
+lookupPath :: FilePath -> Var TagTree -> IO (Maybe TagTree)
 lookupPath path tagTreeHandle =
     let
         go fp tree = case (tree, fp) of
@@ -69,7 +70,7 @@ lookupPath path tagTreeHandle =
             (Dir entries, name : tailPath) -> Map.lookup name entries >>= go tailPath
             _ -> Nothing
     in do
-        tagTree <- atomically $ readTVar tagTreeHandle
+        tagTree <- readVar tagTreeHandle
         pure $ go (pathComponents path) tagTree
 
 getEntryType :: TagTree -> Fuse.EntryType
@@ -77,18 +78,17 @@ getEntryType = \case
     Dir _ -> Fuse.Directory
     Link _ -> Fuse.SymbolicLink
 
-ifExists :: TVar TagTree -> FilePath -> (TagTree -> IO (Either Errno a)) -> IO (Either Errno a)
+ifExists :: Var TagTree -> FilePath -> (TagTree -> IO (Either Errno a)) -> IO (Either Errno a)
 ifExists tree fp f = do
     path <- lookupPath fp tree
     maybe (pure $ Left eNOENT) f path
 
-getFileStat :: MkStat -> TVar TagTree -> FilePath -> IO (Either Errno Fuse.FileStat)
+getFileStat :: MkStat -> Var TagTree -> FilePath -> IO (Either Errno Fuse.FileStat)
 getFileStat (MkStat stat) tree fp = ifExists tree fp (pure . Right . stat . getEntryType)
 
-readSymLink :: TVar TagTree -> FilePath -> IO (Either Errno FilePath)
+readSymLink :: Var TagTree -> FilePath -> IO (Either Errno FilePath)
 readSymLink tree fp =
     let
-        symLinkDest :: TagTree -> IO (Either Errno FilePath)
         symLinkDest = pure . \case
             Link dest -> Right dest
             Dir _ -> Left eINVAL
@@ -99,7 +99,7 @@ passThrough h f = case h of
     External fd -> Right <$> f fd
     Internal -> pure $ Left eNOSYS
 
-openFile  :: TVar TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno TagHandle)
+openFile  :: Var TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno TagHandle)
 openFile tree fp mode flags =
     let
         openAt = \case
@@ -116,12 +116,12 @@ writeExternalFile _ h buf offset = passThrough h $ \fd -> fdPwrite fd buf offset
 flushFile ::  FilePath -> TagHandle -> IO Errno
 flushFile _ h = fromLeft eOK <$> passThrough h closeFd
 
-openDirectory :: TVar TagTree -> FilePath -> IO Errno
+openDirectory :: Var TagTree -> FilePath -> IO Errno
 openDirectory tree fp = do
     path <- lookupPath fp tree
     pure $ maybe eNOENT (const eOK) path
 
-readDirectory :: MkStat -> TVar TagTree -> FilePath -> IO (Either Errno [(FilePath, Fuse.FileStat)])
+readDirectory :: MkStat -> Var TagTree -> FilePath -> IO (Either Errno [(FilePath, Fuse.FileStat)])
 readDirectory (MkStat stat) tree path =
     let
         addStat = stat . getEntryType
@@ -144,7 +144,7 @@ getFileSystemStats = const $ pure $ Right $ Fuse.FileSystemStats
         Fuse.fsStatMaxNameLength = 255
     }
 
-fsOps :: TVar TagTree -> MkStat -> FuseOperations TagHandle
+fsOps :: Var TagTree -> MkStat -> FuseOperations TagHandle
 fsOps tree stat = defaultFuseOps
     {
         fuseGetFileStat = getFileStat stat tree,
@@ -212,26 +212,29 @@ tagsFileName = "tags"
 isTagsFile :: Event -> Bool
 isTagsFile e = (takeFileName $ eventPath e) == tagsFileName
 
-handleFileChanges :: TVar (Map FilePath TagTree) -> TVar TagTree -> Event -> IO ()
-handleFileChanges tagMapHandle tagTreeHandle event =
+handleFileChanges :: Lock -> Var (Map FilePath TagTree) -> Var TagTree -> Event -> IO ()
+handleFileChanges lock tagMapHandle tagTreeHandle event =
     let
         handleEvent absTagsFile tagMap =
             let
-                add :: IO (Map FilePath TagTree)
                 add = do
                     contents <- readTags absTagsFile
-                    print contents
-                    pure $ Map.insert absTagsFile (snd $ allTagTrees contents) tagMap
+                    let newTagTree = snd $ allTagTrees contents
+                    let newTagMap = Map.insert absTagsFile newTagTree tagMap
+                    tagTree <- readVar tagTreeHandle
+                    pure (newTagMap, tagTree <> newTagTree)
             in case event of
                 Added _ _ -> add
                 Modified _ _ -> add
-                Removed _ _ -> pure $ Map.delete absTagsFile tagMap
-    in do
-        tagMap <- atomically $ readTVar tagMapHandle
+                Removed _ _ ->
+                    let newTagMap = Map.delete absTagsFile tagMap
+                    in pure (newTagMap, mkDirTree newTagMap)
+    in withLock lock $ do
         absTagsFile <- makeAbsolute $ eventPath event
-        newTagMap <- handleEvent absTagsFile tagMap
-        atomically $ writeTVar tagMapHandle newTagMap
-        atomically $ writeTVar tagTreeHandle $ mkDirTree newTagMap
+        tagMap <- readVar tagMapHandle
+        (newTagMap, newTagTree) <- handleEvent absTagsFile tagMap
+        writeVar tagMapHandle newTagMap
+        writeVar tagTreeHandle newTagTree
 
 mkDirTree :: Map FilePath TagTree -> TagTree
 mkDirTree = mconcat . Map.elems
@@ -244,9 +247,10 @@ main = withManager $ \mgr -> do
 
     let initialTagMap = Map.fromList (allTagTrees <$> tagsContents)
 
-    tagMap <- atomically $ newTVar initialTagMap
-    dirTree <- atomically $ newTVar $ mkDirTree initialTagMap
-    void $ watchTree mgr "." isTagsFile $ handleFileChanges tagMap dirTree
+    tagMap <- newVar initialTagMap
+    dirTree <- newVar $ mkDirTree initialTagMap
+    lock <- newLock
+    void $ watchTree mgr "." isTagsFile $ handleFileChanges lock tagMap dirTree
 
     userId <- getEffectiveUserID
     groupId <- getEffectiveGroupID

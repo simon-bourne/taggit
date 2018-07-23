@@ -5,6 +5,7 @@ default-extensions:
 - FlexibleInstances
 - LambdaCase
 - NoImplicitPrelude
+- NoMonomorphismRestriction
 - OverloadedStrings
 - PackageImports
 
@@ -14,10 +15,10 @@ dependencies:
   - classy-prelude
   - containers
   - directory
+  - extra
   - filemanip
   - filepath
   - fsnotify
-  - stm
   - unix
   - unix-bytestring
   - utf8-string
