@@ -203,8 +203,8 @@ singleTagTree tagsFile =
         [] -> Dir $ Map.singleton (takeFileName dir) $ Link dir
         tag : tags -> Dir $ Map.singleton tag $ singleTagTree tagsFile tags
 
-allTagTrees :: Tagged -> TagTree
-allTagTrees (Tagged dir paths) = mconcat (singleTagTree dir <$> allPaths paths)
+allTagTrees :: Tagged -> (FilePath, TagTree)
+allTagTrees (Tagged dir paths) = (dir, mconcat (singleTagTree dir <$> allPaths paths))
 
 tagsFileName :: FilePath
 tagsFileName = "tags"
@@ -212,16 +212,41 @@ tagsFileName = "tags"
 isTagsFile :: Event -> Bool
 isTagsFile e = (takeFileName $ eventPath e) == tagsFileName
 
+handleFileChanges :: TVar (Map FilePath TagTree) -> TVar TagTree -> Event -> IO ()
+handleFileChanges tagMapHandle tagTreeHandle event =
+    let
+        handleEvent absTagsFile tagMap =
+            let
+                add :: IO (Map FilePath TagTree)
+                add = do
+                    contents <- readTags absTagsFile
+                    print contents
+                    pure $ Map.insert absTagsFile (snd $ allTagTrees contents) tagMap
+            in case event of
+                Added _ _ -> add
+                Modified _ _ -> add
+                Removed _ _ -> pure $ Map.delete absTagsFile tagMap
+    in do
+        tagMap <- atomically $ readTVar tagMapHandle
+        absTagsFile <- makeAbsolute $ eventPath event
+        newTagMap <- handleEvent absTagsFile tagMap
+        atomically $ writeTVar tagMapHandle newTagMap
+        atomically $ writeTVar tagTreeHandle $ mkDirTree newTagMap
+
+mkDirTree :: Map FilePath TagTree -> TagTree
+mkDirTree = mconcat . Map.elems
+
 main :: IO ()
 main = withManager $ \mgr -> do
     tagsFiles <- File.find (fileType ==? Directory) (fileType ==? RegularFile &&? fileName ==? tagsFileName) "."
     absTagsFiles <- mapM makeAbsolute tagsFiles
     tagsContents <- mapM readTags absTagsFiles
 
-    let initialDirTree = mconcat (allTagTrees <$> tagsContents)
+    let initialTagMap = Map.fromList (allTagTrees <$> tagsContents)
 
-    dirTree <- atomically $ newTVar initialDirTree
-    void $ watchTree mgr "." isTagsFile print
+    tagMap <- atomically $ newTVar initialTagMap
+    dirTree <- atomically $ newTVar $ mkDirTree initialTagMap
+    void $ watchTree mgr "." isTagsFile $ handleFileChanges tagMap dirTree
 
     userId <- getEffectiveUserID
     groupId <- getEffectiveGroupID
