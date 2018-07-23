@@ -126,8 +126,6 @@ readDirectory :: MkStat -> Var TagTree -> FilePath -> IO (Either Errno [(FilePat
 readDirectory (MkStat stat) tree path =
     let
         addStat = stat . getEntryType
-
-        readIfDir :: TagTree -> IO (Either Errno [(FilePath, Fuse.FileStat)])
         readIfDir = pure . \case
             Link _ -> Left eNOTDIR
             Dir entries -> Right $ ((addStat <$>) <$> Map.toList entries)
