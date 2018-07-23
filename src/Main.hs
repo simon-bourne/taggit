@@ -1,6 +1,11 @@
+{-# LANGUAGE FlexibleInstances #-}
 module Main (main) where
 
+import ClassyPrelude
+import Codec.Binary.UTF8.String(decode)
 import Data.ByteString.Char8 (ByteString)
+import System.FilePath.Find (fileType, fileName, FileType(..), (==?), (&&?))
+import qualified System.FilePath.Find as File
 import System.Posix.Types (GroupID, UserID, FileOffset, Fd, ByteCount)
 import System.Posix.Files
     (
@@ -33,38 +38,43 @@ import System.Fuse
 import qualified System.Fuse as Fuse
 import Data.Map.Lazy (Map)
 import qualified Data.Map.Strict as Map
-import System.FilePath (splitPath)
+import System.FilePath (takeFileName, takeDirectory, splitPath)
 import Data.List (dropWhileEnd)
 import System.Posix.User (getEffectiveGroupID, getEffectiveUserID)
 import Data.Either (fromLeft)
 
-data Handle = External Fd | Internal
+data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
 
+instance Semigroup TagTree where
+    x <> y = case (x, y) of
+        (Link _, Link _) -> x -- TODO: Report this
+        (Dir entries, Link _)
+            | null entries -> y
+            | otherwise -> x
+        (Link _, _) -> y <> x
+        (Dir entriesX, Dir entriesY) -> Dir $ Map.unionWith mappend entriesX entriesY
+
+-- TODO: Report errors. Make Either Error TagTree an instance of Monoid instead, or collect the errors in a list.
+instance Monoid TagTree where
+    mempty = Dir Map.empty
+    mappend = (<>)
+
 {- TODO
-
-Find all tags files and build a list of tags for each file. Each file is reached via a path in `concat (subsequences <$> permutation paths)`.
-Combine all paths to make a `TagTree`.
-
-To avoid conflicts, we have a directory for sub tags. The directory is called `and`, `or` or `not`, corresponding to the logical operator.
-
 It may be better to view this as building an expression, where it's not useful to show tautologies like `X and X`.
 Tautologies may be the wrong concept - maybe we want the concept of only showing things that would narrow down the set.
 -}
-dirTree :: TagTree
-dirTree = Dir $ Map.fromList [("simon", Link "/home/simon"), ("test", Dir $ Map.fromList [("xyz", Link "/home/simon/bin/BourneoDB.sh"), ("andOn", Dir $ Map.fromList [("andOn", dirTree)])])]
+pathComponents :: FilePath -> [FilePath]
+pathComponents path = filter (/= "") (dropWhileEnd (== '/') <$> splitPath path)
 
 lookupPath :: FilePath -> TagTree -> Maybe TagTree
 lookupPath path =
     let
-        removeTrailingSlashes = dropWhileEnd (== '/')
-        removeRoot = filter (/= "/")
-
         go fp tree = case (tree, fp) of
             (_, []) -> Just tree
-            (Dir entries, name : tailPath) -> Map.lookup (removeTrailingSlashes name) entries >>= go tailPath
+            (Dir entries, name : tailPath) -> Map.lookup name entries >>= go tailPath
             _ -> Nothing
-    in go (removeRoot $ splitPath path)
+    in go $ pathComponents path
 
 getEntryType :: TagTree -> Fuse.EntryType
 getEntryType = \case
@@ -88,12 +98,12 @@ readSymLink tree fp =
             Dir _ -> Left eINVAL
     in ifExists tree fp symLinkDest
 
-passThrough :: Handle -> (Fd -> IO a) -> IO (Either Errno a)
+passThrough :: TagHandle -> (Fd -> IO a) -> IO (Either Errno a)
 passThrough h f = case h of
     External fd -> Right <$> f fd
     Internal -> pure $ Left eNOSYS
 
-openFile  :: TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno Handle)
+openFile  :: TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno TagHandle)
 openFile tree fp mode flags =
     let
         openAt = \case
@@ -101,13 +111,13 @@ openFile tree fp mode flags =
             Dir _ -> pure $ Right Internal
     in ifExists tree fp openAt
 
-readExternalFile :: FilePath -> Handle -> ByteCount -> FileOffset -> IO (Either Errno ByteString)
+readExternalFile :: FilePath -> TagHandle -> ByteCount -> FileOffset -> IO (Either Errno ByteString)
 readExternalFile _ h bc offset = passThrough h $ \fd -> fdPread fd bc offset
 
-writeExternalFile ::  FilePath -> Handle -> ByteString -> FileOffset -> IO (Either Errno ByteCount)
+writeExternalFile ::  FilePath -> TagHandle -> ByteString -> FileOffset -> IO (Either Errno ByteCount)
 writeExternalFile _ h buf offset = passThrough h $ \fd -> fdPwrite fd buf offset
 
-flushFile ::  FilePath -> Handle -> IO Errno
+flushFile ::  FilePath -> TagHandle -> IO Errno
 flushFile _ h = fromLeft eOK <$> passThrough h closeFd
 
 openDirectory :: TagTree -> FilePath -> IO Errno
@@ -136,7 +146,7 @@ getFileSystemStats = const $ pure $ Right $ Fuse.FileSystemStats
         Fuse.fsStatMaxNameLength = 255
     }
 
-fsOps :: TagTree -> MkStat -> FuseOperations Handle
+fsOps :: TagTree -> MkStat -> FuseOperations TagHandle
 fsOps tree stat = defaultFuseOps
     {
         fuseGetFileStat = getFileStat stat tree,
@@ -175,8 +185,28 @@ mkStat userId groupId = MkStat $ \entryType -> Fuse.FileStat
         Fuse.statStatusChangeTime = 0
     }
 
+data Tagged = Tagged FilePath [FilePath] deriving Show
+
+readTags :: FilePath -> IO Tagged
+readTags tagsFile = (Tagged tagsFile . filter (/= "") . lines . decode . unpack) <$> readFile tagsFile
+
+allPaths :: [FilePath] -> [[FilePath]]
+allPaths tags = concat (((intercalate ["and"] <$>) <$> permutations <$> subsequences (pathComponents <$> tags)))
+
+singleTagTree :: FilePath -> [FilePath] -> TagTree
+singleTagTree dir = \case
+    [] -> Dir $ Map.singleton (takeFileName $ takeDirectory dir) $ Link dir
+    tag : tags -> Dir $ Map.singleton tag $ singleTagTree dir tags
+
+allTagTrees :: Tagged -> TagTree
+allTagTrees (Tagged dir paths) = mconcat (singleTagTree dir <$> allPaths paths)
+
 main :: IO ()
 main = do
+    tagsFiles <- File.find (fileType ==? Directory) (fileType ==? RegularFile &&? fileName ==? "tags") "."
+    tagsContents <- mapM readTags tagsFiles
+
+    let dirTree = mconcat (allTagTrees <$> tagsContents)
     userId <- getEffectiveUserID
     groupId <- getEffectiveGroupID
     fuseMain (fsOps dirTree $ mkStat userId groupId) Fuse.defaultExceptionHandler

@@ -2,16 +2,20 @@ name:                tagit
 version:             0.1.0.0
 
 default-extensions:
-- PackageImports
 - LambdaCase
+- NoImplicitPrelude
+- PackageImports
 
 dependencies:
   - base >= 4.7 && < 5
   - bytestring
+  - classy-prelude
   - containers
+  - filemanip
   - filepath
   - unix
   - unix-bytestring
+  - utf8-string
   - HFuse
 
 ghc-options:
