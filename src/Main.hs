@@ -187,8 +187,13 @@ data Tagged = Tagged FilePath [FilePath] deriving Show
 readTags :: FilePath -> IO Tagged
 readTags tagsFile = (Tagged tagsFile . filter (/= "") . lines . decode . unpack) <$> readFile tagsFile
 
+prefixNonEmpty :: a -> [[a]] -> [a]
+prefixNonEmpty x = \case
+    [] -> []
+    xs -> x : intercalate [x] xs
+
 allPaths :: [FilePath] -> [[FilePath]]
-allPaths tags = concat (((intercalate ["and"] <$>) <$> permutations <$> subsequences (pathComponents <$> tags)))
+allPaths tags = concat (((prefixNonEmpty "and" <$>) <$> permutations <$> subsequences (pathComponents <$> tags)))
 
 singleTagTree :: FilePath -> [FilePath] -> TagTree
 singleTagTree tagsFile =
