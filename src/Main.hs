@@ -42,8 +42,8 @@ import Data.List (dropWhileEnd)
 import System.Posix.User (getEffectiveGroupID, getEffectiveUserID)
 import Data.Either (fromLeft)
 import System.Directory (makeAbsolute)
-import System.FSNotify
-import Control.Concurrent.Extra
+import System.FSNotify (watchTree, withManager, eventPath, Event(..), Event)
+import Control.Concurrent.Extra (newLock, newVar, writeVar, readVar, withLock, Var, Lock)
 
 data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
