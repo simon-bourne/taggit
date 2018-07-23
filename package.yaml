@@ -5,6 +5,7 @@ default-extensions:
 - FlexibleInstances
 - LambdaCase
 - NoImplicitPrelude
+- OverloadedStrings
 - PackageImports
 
 dependencies:
@@ -15,6 +16,8 @@ dependencies:
   - directory
   - filemanip
   - filepath
+  - fsnotify
+  - stm
   - unix
   - unix-bytestring
   - utf8-string

@@ -42,6 +42,7 @@ import Data.List (dropWhileEnd)
 import System.Posix.User (getEffectiveGroupID, getEffectiveUserID)
 import Data.Either (fromLeft)
 import System.Directory (makeAbsolute)
+import System.FSNotify
 
 data TagHandle = External Fd | Internal
 data TagTree = Link FilePath | Dir (Map FilePath TagTree) deriving Show
@@ -60,29 +61,31 @@ instance Monoid TagTree where
 pathComponents :: FilePath -> [FilePath]
 pathComponents path = filter (/= "") (dropWhileEnd (== '/') <$> splitPath path)
 
-lookupPath :: FilePath -> TagTree -> Maybe TagTree
-lookupPath path =
+lookupPath :: FilePath -> TVar TagTree -> IO (Maybe TagTree)
+lookupPath path tagTreeHandle =
     let
         go fp tree = case (tree, fp) of
             (_, []) -> Just tree
             (Dir entries, name : tailPath) -> Map.lookup name entries >>= go tailPath
             _ -> Nothing
-    in go $ pathComponents path
+    in do
+        tagTree <- atomically $ readTVar tagTreeHandle
+        pure $ go (pathComponents path) tagTree
 
 getEntryType :: TagTree -> Fuse.EntryType
 getEntryType = \case
     Dir _ -> Fuse.Directory
     Link _ -> Fuse.SymbolicLink
 
-ifExists :: TagTree -> FilePath -> (TagTree -> IO (Either Errno a)) -> IO (Either Errno a)
-ifExists tree fp f =
-    let path = lookupPath fp tree
-    in maybe (pure $ Left eNOENT) f path
+ifExists :: TVar TagTree -> FilePath -> (TagTree -> IO (Either Errno a)) -> IO (Either Errno a)
+ifExists tree fp f = do
+    path <- lookupPath fp tree
+    maybe (pure $ Left eNOENT) f path
 
-getFileStat :: MkStat -> TagTree -> FilePath -> IO (Either Errno Fuse.FileStat)
+getFileStat :: MkStat -> TVar TagTree -> FilePath -> IO (Either Errno Fuse.FileStat)
 getFileStat (MkStat stat) tree fp = ifExists tree fp (pure . Right . stat . getEntryType)
 
-readSymLink :: TagTree -> FilePath -> IO (Either Errno FilePath)
+readSymLink :: TVar TagTree -> FilePath -> IO (Either Errno FilePath)
 readSymLink tree fp =
     let
         symLinkDest :: TagTree -> IO (Either Errno FilePath)
@@ -96,7 +99,7 @@ passThrough h f = case h of
     External fd -> Right <$> f fd
     Internal -> pure $ Left eNOSYS
 
-openFile  :: TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno TagHandle)
+openFile  :: TVar TagTree -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno TagHandle)
 openFile tree fp mode flags =
     let
         openAt = \case
@@ -113,10 +116,12 @@ writeExternalFile _ h buf offset = passThrough h $ \fd -> fdPwrite fd buf offset
 flushFile ::  FilePath -> TagHandle -> IO Errno
 flushFile _ h = fromLeft eOK <$> passThrough h closeFd
 
-openDirectory :: TagTree -> FilePath -> IO Errno
-openDirectory tree fp = pure $ maybe eNOENT (const eOK) $ lookupPath fp tree
+openDirectory :: TVar TagTree -> FilePath -> IO Errno
+openDirectory tree fp = do
+    path <- lookupPath fp tree
+    pure $ maybe eNOENT (const eOK) path
 
-readDirectory :: MkStat -> TagTree -> FilePath -> IO (Either Errno [(FilePath, Fuse.FileStat)])
+readDirectory :: MkStat -> TVar TagTree -> FilePath -> IO (Either Errno [(FilePath, Fuse.FileStat)])
 readDirectory (MkStat stat) tree path =
     let
         addStat = stat . getEntryType
@@ -139,7 +144,7 @@ getFileSystemStats = const $ pure $ Right $ Fuse.FileSystemStats
         Fuse.fsStatMaxNameLength = 255
     }
 
-fsOps :: TagTree -> MkStat -> FuseOperations TagHandle
+fsOps :: TVar TagTree -> MkStat -> FuseOperations TagHandle
 fsOps tree stat = defaultFuseOps
     {
         fuseGetFileStat = getFileStat stat tree,
@@ -201,13 +206,24 @@ singleTagTree tagsFile =
 allTagTrees :: Tagged -> TagTree
 allTagTrees (Tagged dir paths) = mconcat (singleTagTree dir <$> allPaths paths)
 
+tagsFileName :: FilePath
+tagsFileName = "tags"
+
+isTagsFile :: Event -> Bool
+isTagsFile e = (takeFileName $ eventPath e) == tagsFileName
+
 main :: IO ()
-main = do
-    tagsFiles <- File.find (fileType ==? Directory) (fileType ==? RegularFile &&? fileName ==? "tags") "."
+main = withManager $ \mgr -> do
+    tagsFiles <- File.find (fileType ==? Directory) (fileType ==? RegularFile &&? fileName ==? tagsFileName) "."
     absTagsFiles <- mapM makeAbsolute tagsFiles
     tagsContents <- mapM readTags absTagsFiles
 
-    let dirTree = mconcat (allTagTrees <$> tagsContents)
+    let initialDirTree = mconcat (allTagTrees <$> tagsContents)
+
+    dirTree <- atomically $ newTVar initialDirTree
+    void $ watchTree mgr "." isTagsFile print
+
     userId <- getEffectiveUserID
     groupId <- getEffectiveGroupID
+
     fuseMain (fsOps dirTree $ mkStat userId groupId) Fuse.defaultExceptionHandler
